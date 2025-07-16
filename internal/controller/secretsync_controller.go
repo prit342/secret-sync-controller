@@ -74,7 +74,7 @@ const (
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	//l := logf.FromContext(ctx)
+	// l := logf.FromContext(ctx)
 	l := logf.Log.WithName("SecretSyncReconciler")
 
 	l.Info("reconciling for", req.Name, req.NamespacedName)
@@ -101,20 +101,28 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		l.Info("deleting instance and child resources", "name", instance.Name, "namespace", instance.Namespace)
 		if err := r.deleteChildObjects(ctx, instance); err != nil {
 			l.Error(err, "failed to delete child objects")
-			r.updateStatus(ctx, instance, fmt.Sprintf("failed to delete child objects: %s", err), true)
+			if err := r.updateStatus(ctx, instance, 
+				fmt.Sprintf("failed to delete child objects: %s", err), true); err != nil {
+				l.Error(err, "failed to update status after error deleting child objects")
+				}
+			}
 			// we want to requeue this request to try again later
-			return ctrl.Result{RequeueAfter: 7 * time.Minute}, nil // Try again later
+			return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later
 		}
 		// remove finzalizer if it exists
 		if err := r.RemoveFinalizer(ctx, instance, secretSyncFinalizer); err != nil {
 			l.Error(err, "failed to delete finalizer")
-			r.updateStatus(ctx, instance, fmt.Sprintf("%s", err), true) // Update status with error
-			return ctrl.Result{RequeueAfter: 7 * time.Minute}, nil      // Try again later
+			if err := r.updateStatus(ctx, instance, 
+				fmt.Sprintf("%s", err), true); err != nil { // Update status with error
+				l.Error(err, "failed to update status after error removing finalizer")
+				// we want to requeue this request to try again later
+				}
+			return ctrl.Result{RequeueAfter: requeueDelay}, nil      // Try again later
 		}
 
 		if err := r.Update(ctx, instance); err != nil {
 			l.Error(err, "failed to update instance after removing finalizer")
-			return ctrl.Result{RequeueAfter: 7 * time.Minute}, nil // Try again later
+			return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later
 		}
 		l.Info("finalizer removed and child resources deleted", "name", instance.Name, "namespace", instance.Namespace)
 		return ctrl.Result{}, nil // No need to requeue, cleanup done

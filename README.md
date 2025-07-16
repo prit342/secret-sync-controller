@@ -68,6 +68,72 @@ If the secret in the target namespace is already present:
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
 
+### Quick testing
+- Create a cluster using `kind` or `minikube`. For example using `kind`:
+
+```sh
+kind create cluster --name secret-sync-cluster
+```
+
+- Install the controller using the provided `Makefile` commands. You can also run it locally using `make run`. Make sure you run this in a different termina window.
+- In a different terminal window, apply the sample `SecretSync` CRD provided in the `config/samples/` directory to test the functionality.
+```bash
+❯ kubectl apply -f config/crd/bases/sync.example.com_secretsyncs.yaml
+customresourcedefinition.apiextensions.k8s.io/secretsyncs.sync.example.com created
+```
+
+- Create the source secret in the `default` namespace:
+```
+kubectl apply -f ./test-manifest/source-secret.yaml
+```
+- Create a custom CR to test the controller.
+```
+❯ kubectl apply -f ./test-manifest/cr.yaml
+namespace/test1 created
+namespace/test2 created
+secretsync.sync.example.com/sync-my-secret created
+
+❯ kubectl get secretsyncs -A
+NAMESPACE   NAME             SYNCED   MESSAGE                                                           LASTTRANSITION
+default     sync-my-secret   True     successfully synced secret my-secret to namespaces: test1,test2   2025-07-16T17:29:44Z
+```
+- To check what happens when you update the source secret, you can edit the `source-secret.yaml` file and change the data. For example, change the value of `key1` to `new-value1`, and then apply the changes:
+```bash
+kubectl patch secret my-secret -n default --type='merge' -p '{"data":{"key1":"bmV3LXZhbHVlMQo="}}'
+```
+- The controller will automatically detect the change and update the target secrets in `test1` and `test2` namespaces. You can verify this by checking the secrets in those namespaces:
+
+- You can also check what happens when you try to create duplicate secrets by specifying the same source secret in multiple `SecretSync` CRs. The controller will log a warning and skip syncing those secrets if they are not managed by the same CR.
+
+```bash
+❯ kubectl apply -f test-manifest/duplicate-cr.yaml
+
+❯ kubectl get secretsyncs -A
+NAMESPACE   NAME                       SYNCED   MESSAGE                                                                                                                                       LASTTRANSITION
+default     sync-my-secret             True     successfully synced secret my-secret to namespaces: test1,test2                                                                               2025-07-16T17:31:43Z
+default     sync-my-secret-duplicate   False    failed to sync object: the secret my-secret already exists in namespace test1 and is not owned by this instance sync-my-secret-duplicate...   2025-07-16T17:32:50Z
+```
+
+- If you delete the CRs, the controller will automatically delete the target secrets in the specified namespaces:
+
+```bash
+❯ kubectl delete secretsyncs.sync.example.com sync-my-secret
+secretsync.sync.example.com "sync-my-secret" deleted
+❯ kubectl get secrets -n test1,test2
+No resources found in test1,test2 namespace.
+```
+- If you delete the source secret, the controller will log an error and update the `.status` field of the `SecretSync` CR. Once the source secret is recreated, the controller will automatically sync it to the target namespaces again.
+
+```bash
+❯ kubectl apply -f ./test-manifest/
+❯ kubectl delete secret my-secret
+secret "my-secret" deleted
+
+❯ kubectl get secretsyncs.sync.example.com
+NAME                       SYNCED   MESSAGE                                                                                    LASTTRANSITION
+sync-my-secret-duplicate   False    error reading source secret my-secret in namespace default: Secret "my-secret" not found   2025-07-16T17:38:34Z
+```
+
 ### To Deploy on the cluster
 **Build and push your image to the location specified by `IMG`:**
 
