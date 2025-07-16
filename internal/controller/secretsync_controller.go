@@ -26,10 +26,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	syncv1alpha1 "github.com/prit342/secret-sync-controller/api/v1alpha1"
 
@@ -52,6 +54,7 @@ const (
 	controllerOwnerNameKey      = "secretsync.example.com/owner-name"
 	controllerOwnerNamespacekey = "secretsync.example.com/owner-namespace"
 	secretSyncFinalizer         = "secretsync.example.com/finalizer" // finalizer to be added to the SecretSync object
+	requeueDelay                = 7 * time.Minute
 )
 
 // +kubebuilder:rbac:groups=sync.example.com,resources=secretsyncs,verbs=get;list;watch;create;update;patch;delete
@@ -98,37 +101,41 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		l.Info("deleting instance and child resources", "name", instance.Name, "namespace", instance.Namespace)
 		if err := r.deleteChildObjects(ctx, instance); err != nil {
 			l.Error(err, "failed to delete child objects")
-			r.updateStatus(ctx, instance, fmt.Sprintf("failed to delete child objects: %s", err))
-			return ctrl.Result{}, err // Try again later
+			r.updateStatus(ctx, instance, fmt.Sprintf("failed to delete child objects: %s", err), true)
+			// we want to requeue this request to try again later
+			return ctrl.Result{RequeueAfter: 7 * time.Minute}, nil // Try again later
 		}
 		// remove finzalizer if it exists
 		if err := r.RemoveFinalizer(ctx, instance, secretSyncFinalizer); err != nil {
 			l.Error(err, "failed to delete finalizer")
-			r.updateStatus(ctx, instance, fmt.Sprintf("%s", err))
-			return ctrl.Result{}, err // Try again later
+			r.updateStatus(ctx, instance, fmt.Sprintf("%s", err), true) // Update status with error
+			return ctrl.Result{RequeueAfter: 7 * time.Minute}, nil      // Try again later
 		}
 
 		if err := r.Update(ctx, instance); err != nil {
 			l.Error(err, "failed to update instance after removing finalizer")
-			return ctrl.Result{}, err // Try again later
+			return ctrl.Result{RequeueAfter: 7 * time.Minute}, nil // Try again later
 		}
 		l.Info("finalizer removed and child resources deleted", "name", instance.Name, "namespace", instance.Namespace)
 		return ctrl.Result{}, nil // No need to requeue, cleanup done
 
 	}
 	// Step 3: Add finalizer if not present
+	// on the first reconciliation, we need to add the finalizer
+	// this is to ensure that we can clean up the child resources when the CR is deleted
 	if !objectHasFinalizer {
 		if ok := controllerutil.AddFinalizer(instance, secretSyncFinalizer); !ok {
 			l.Error(fmt.Errorf("failed to add finalizer %s to instance %s", secretSyncFinalizer, instance.Name),
 				"failed to add finalizer")
-			return ctrl.Result{}, fmt.Errorf("failed to add finalizer %q to instance %q",
-				secretSyncFinalizer, instance.Name)
+			return ctrl.Result{RequeueAfter: 7 * time.Minute}, nil // Try again later
 		}
 		if err := r.Update(ctx, instance); err != nil {
 			l.Error(err, "failed to update instance after adding finalizer")
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later
 		}
 		// Return to requeue and ensure consistent state before continuing
+		// we have added the finalizer, so we can requeue
+		l.Info("finalizer added to instance", "name", instance.Name, "namespace", instance.Namespace)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
@@ -136,13 +143,12 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// we cannot copy the source object to itself
 	if err := checkSourceInTargetNamespaces(instance); err != nil {
 		l.Error(err, "failed to sync")
-		if uerr := r.updateStatus(ctx, instance, err.Error()); uerr != nil {
+		if uerr := r.updateStatus(ctx, instance, err.Error(), true); uerr != nil {
 			return ctrl.Result{}, errors.Join(uerr, err) // Try again later
 		}
 		return ctrl.Result{}, nil // No need to requeue, we have updated the status
 	}
 	//
-
 	srcSecret := &corev1.Secret{} // the source secret we need to sync/copy to the target namespaces
 	// try to read the source secret from the source namespace
 	if err := r.Get(ctx, types.NamespacedName{
@@ -150,42 +156,67 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		Namespace: instance.Spec.SourceNamespace,
 	}, srcSecret); err != nil {
 		// if there was an error reading the source secret, we will update the status
-		m := fmt.Sprintf("error reading source secret %s in namespace %s: %s",
+		// with correct message and requeue and retry later
+		msg := fmt.Sprintf("error reading source secret %s in namespace %s: %s",
 			instance.Spec.SourceName, instance.Spec.SourceNamespace, err)
-		if err != r.updateStatus(ctx, instance, m) {
-			return ctrl.Result{RequeueAfter: 7 * time.Minute}, nil // Try again later after 7 minutes
+		l.Error(err, msg)
+		if err := r.updateStatus(ctx, instance, msg, true); err != nil {
+			l.Error(err, "failed to update status after error reading source secret")
+			return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later after 7 minutes
 		}
+		return ctrl.Result{RequeueAfter: requeueDelay}, nil // No need to requeue, we have updated the status
 	}
 
 	// sync the object into the target namespaces
 	if err := r.syncSecretToNamespaces(ctx, instance, srcSecret, instance.Spec.TargetNamespaces); err != nil {
-		l.Error(err, "failed to copy the source to destination namespaces")
-		if uerr := r.updateStatus(ctx, instance, fmt.Sprintf("failed to sync object: %s", err)); uerr != nil {
-			return ctrl.Result{RequeueAfter: 5 * time.Minute}, err
+		l.Error(err, "failed to copy the source secret to destination namespaces")
+		if uerr := r.updateStatus(ctx, instance, fmt.Sprintf("failed to sync object: %s", err), true); uerr != nil {
+			l.Error(uerr, "failed to update status after sync error")
+			return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later after 7 minutes
 		}
+		return ctrl.Result{RequeueAfter: requeueDelay}, nil // we cannot continue, try again later
 	}
 
 	// once synced, we need to update the status
 	successMessage := fmt.Sprintf("successfully synced secret %s to namespaces: %s",
 		instance.Spec.SourceName, strings.Join(instance.Spec.TargetNamespaces, ","))
-	if err := r.updateStatus(ctx, instance, successMessage); err != nil {
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, err
+	if err := r.updateStatus(ctx, instance, successMessage, false); err != nil {
+		l.Error(err, "failed to update status after successful sync")
+		return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later after 7 minutes
 	}
 
 	l.Info(successMessage)
+
 	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SecretSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		// Primary resource: Reconcile will be triggered when a SecretSync object is created, updated, or deleted.
 		For(&syncv1alpha1.SecretSync{}).
-		// we watch for changes to secret objects and map them to SecretSync reconcile requests
-		// this is used to re-sync SecretSync CRs when the source secret changes
+		//
+		// Secondary watch: also watch Secret objects across all namespaces.
+		// This ensures we re-trigger reconciliation of relevant SecretSyncs if the source Secret is created or updated.
+		//
+		// For example:
+		// - If a SecretSync exists but the source Secret doesn't yet, this will allow us to sync it once it appears.
+		// - If a Secret is updated (e.g., its data changes), we want to propagate the changes to all target namespaces.
 		Watches(
-			&corev1.Secret{},
+			&corev1.Secret{}, // The object type to watch
+			//
+			// The mapping function: when a Secret is changed, we call this function
+			// to determine which SecretSyncs reference this Secret (via sourceName + sourceNamespace).
 			handler.EnqueueRequestsFromMapFunc(r.mapSecretToSecretSyncs),
+			//
+			// Predicate: limit the watch to only fire when a meaningful change happens to the Secret.
+			// This filters out no-op updates. For example, this triggers on:
+			// - Secret creation
+			// - Secret data changes
+			// - Label/annotation updates
+			// But NOT on resyncs with no changes
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
-		Named("secretsync").
-		Complete(r)
+		Named("secretsync"). // Give the controller a name for logs/metrics/etc.
+		Complete(r)          // Complete the controller setup
 }

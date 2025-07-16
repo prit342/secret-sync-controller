@@ -3,11 +3,15 @@ package controller
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 
 	syncv1alpha1 "github.com/prit342/secret-sync-controller/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	successReason = "SecretSyncedSuccessfully"
+	failedReason  = "SecretSyncFailed"
 )
 
 // updateStatus - udpates the status of the CR object
@@ -15,10 +19,29 @@ func (r *SecretSyncReconciler) updateStatus(
 	ctx context.Context, // context for the API call
 	instance *syncv1alpha1.SecretSync, // the CR that needs to be updated
 	message string, // message on the status field
+	isError bool, // if true, the status will be set to "Error", otherwise "Success"
 ) error {
-	instance.Status.Message = message
+	// we set some fields to reflect that current state of the CR
 	instance.Status.LastSyncTime = metav1.Now()
-	log.Println(message)
+
+	// Set condition
+	condition := metav1.Condition{
+		Type:               "Synced", // type of the condition
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: instance.Generation,
+		Message:            message,
+		Status:             metav1.ConditionTrue,
+		Reason:             successReason,
+	}
+	// if there is an error, we set the status to "False"
+	if isError {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = failedReason
+	}
+
+	// we are not appending the condition, we are replacing it
+	// this is because we want to have only one condition of type "Synced" at a time
+	instance.Status.Conditions = []metav1.Condition{condition}
 	return r.Status().Update(ctx, instance)
 }
 

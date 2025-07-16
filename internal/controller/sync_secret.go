@@ -26,7 +26,6 @@ func (r *SecretSyncReconciler) syncSecretToNamespaces(
 	for _, ns := range dstNamespaces {
 
 		// copy := srcObj.DeepCopyObject()
-
 		copySecret := &corev1.Secret{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: srcSecret.APIVersion,
@@ -50,7 +49,7 @@ func (r *SecretSyncReconciler) syncSecretToNamespaces(
 		// so the above snippet does not work
 		//
 		// before we copy the object, we need to check if the secret exists in the target namespace
-		if err := r.checkIfSecretAlreadyExistsAndNotOwned(ctx, instance); err != nil {
+		if err := r.checkIfSecretAlreadyExistsAndNotOwned(ctx, instance, ns); err != nil {
 			// if the secret already exists in the target namespace and is not owned by this CR,
 			// we need to return an error and not copy the secret object
 			// but we need to continue the loop so that we can check the next namespace
@@ -96,68 +95,59 @@ func (r *SecretSyncReconciler) syncSecretToNamespaces(
 func (r *SecretSyncReconciler) checkIfSecretAlreadyExistsAndNotOwned(
 	ctx context.Context, // context for the API call
 	instance *syncv1alpha1.SecretSync, // the CR that called the reconcile function
+	ns string, // the namespace where we want to check if the secret already exists
 ) error {
-	for _, ns := range instance.Spec.TargetNamespaces { // iterate over the target namespaces
-		// check if the secret or configmap already exists in the target namespace
-		var secret corev1.Secret // this is our generic object that we will use to read the secret
 
-		// read the object from our local cache to see if already exists
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      instance.Spec.SourceName, // the name of the secret
-			Namespace: ns,                       // the namespace where we want to check
-		}, &secret)
+	var secret corev1.Secret // this is where we will store the secret object we read from
 
-		if err != nil {
-			if client.IgnoreNotFound(err) == nil {
-				// if the object is not found, we can continue
-				continue
-			}
-			return fmt.Errorf("error reading object %s in namespace %s: %w",
-				instance.Spec.SourceName, ns, err)
+	// read the object from our local cache to see if already exists
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      instance.Spec.SourceName, // the name of the secret
+		Namespace: ns,                       // the namespace where we want to check
+	}, &secret)
+
+	if err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			// if the object is not found, we can continue
+			return nil // this means that the object does not exist in the target namespace
 		}
-		// so the object already exists in the target namespace
-		// we need to check if the object is owned by this CR or not
-		// we will check the annotations on the secret to see if it is owned by this CR or not
-		// if the object is owned by this CR, we can continue
-		// if the object is not owned by this CR, we need to return an error
-
-		annots := secret.GetAnnotations()
-		// if the object has no annotations, we need to return an error
-		// this is because we cannot determine if the object is owned by this CR or not
-		if annots == nil {
-			// if there are no annotations, we can continue
-			return fmt.Errorf("the secret %s already exists in namespace %s but has no"+
-				" annotations, please check if this is owned by this CR", instance.Spec.SourceName, ns)
-		}
-
-		// if the object is not owned by this CR, we need to return an error as we cannot copy the object
-		// it might be owned by another CR or it might be a manually created object
-		if val, ok := annots[controllerNameKey]; ok && val != controllerNameValue {
-			return fmt.Errorf("the secret %s already exists in namespace %s and is not owned by this CR, "+
-				"please check if this is owned by this CR", instance.Spec.SourceName, ns)
-		}
-
-		// at this stage, we know that the object is owned by this controller
-		// but we need to check if the object is owned by this particular instance of the controller
-		// we will check the annotations on the secret to see if it is owned by this instance or not
-		// if the object is owned by this instance, we can continue
-		// if the object is not owned by this instance, we need to return an error
-
-		// if the object is NOT owned by this particular instance, we need to return an error
-		if val, ok := annots[controllerOwnerNameKey]; ok && val != instance.Name {
-			return fmt.Errorf("the secret %s already exists in namespace %s and is not owned by this instance %s",
-				instance.Spec.SourceName, ns, instance.Name)
-		}
-
-		// Finally we also check if the namespace of the owner is the same as the instance namespace
-		// if the namespace of the owner is not the same as the instance namespace, we
-		// need to return an error as we cannot copy the object
-		// this is because the owner namespace is not the same as the instance namespace
-		if val, ok := annots[controllerOwnerNamespacekey]; ok && val != instance.Namespace {
-			return fmt.Errorf("the secret %s already exists in namespace %s and is not owned by this instance %s, "+
-				"please check if this is owned by this instance", instance.Spec.SourceName, ns, instance.Name)
-		}
+		return fmt.Errorf("error reading object %s in namespace %s: %w", instance.Spec.SourceName, ns, err)
 	}
-	// if we reach here, it means the object is not owned by this CR and we can continue
-	return nil
+	// so the object already exists in the target namespace
+	// we need to check if the object is owned by this CR or not
+	// we will check the annotations on the secret to see if it is owned by this CR or not
+	// if the object is owned by this CR, we can continue
+	// if the object is not owned by this CR, we need to return an error
+	annots := secret.GetAnnotations()
+	// if the object has no annotations, we need to return an error
+	// this is because we cannot determine if the object is owned by this CR or not
+	if annots == nil {
+		// if there are no annotations, we can continue
+		return fmt.Errorf("the secret %s already exists in namespace %s but has no"+
+			" annotations, please check if this is owned by this CR", instance.Spec.SourceName, ns)
+	}
+	// if the object is not owned by this CR, we need to return an error as we cannot copy the object
+	// it might be owned by another CR or it might be a manually created object
+	if val, ok := annots[controllerNameKey]; ok && val != controllerNameValue {
+		return fmt.Errorf("the secret %s already exists in namespace %s and is not owned by this CR, "+
+			"please check if this is owned by this CR", instance.Spec.SourceName, ns)
+	}
+	// at this stage, we know that the object is owned by an instance of this controller
+	// but we need to check if the object is owned by this particular instance of the controller
+	// we will check the annotations on the secret to see if it is owned by this instance or not
+	// if the object is NOT owned by this particular instance, we need to return an error
+	if val, ok := annots[controllerOwnerNameKey]; ok && val != instance.Name {
+		return fmt.Errorf("the secret %s already exists in namespace %s and is not owned by this instance %s",
+			instance.Spec.SourceName, ns, instance.Name)
+	}
+	// Finally we also check if the namespace of the owner is the same as the instance namespace
+	// if the namespace of the owner is not the same as the instance namespace, we
+	// need to return an error as we cannot copy the object
+	// this is because the owner namespace is not the same as the instance namespace
+	if val, ok := annots[controllerOwnerNamespacekey]; ok && val != instance.Namespace {
+		return fmt.Errorf("the secret %s already exists in namespace %s and is not owned by this instance %s, "+
+			"please check if this is owned by this instance", instance.Spec.SourceName, ns, instance.Name)
+	}
+
+	return nil // this means that the object is owned by this instance and we can continue
 }

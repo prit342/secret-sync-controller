@@ -1,8 +1,64 @@
 # secret-sync-controller
-// TODO(user): Add simple overview of use/purpose
+The **SecretSync Controller** is a Kubernetes controller that allows you to sync a `Secret` from a single source namespace into one or more target namespaces.
+This is useful in multi-tenant or namespace-isolated environments where shared credentials need to be replicated automatically and safely.
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+
+## Custom Resource Definition (CRD)
+
+A `SecretSync` custom resource looks like this:
+
+```yaml
+apiVersion: sync.example.com/v1alpha1
+kind: SecretSync
+metadata:
+  name: sync-my-secret 
+  namespace: default
+spec:
+  sourceName: my-secret ## the source secret that will be copied
+  sourceNamespace: default ## the namespace where source secreted can be found
+  targetNamespaces:
+    - team-a # the target namespace where the source secret will be copied
+    - team-b # the target namespace where the source secret will be copied
+```
+- In the above example, the `SecretSync` controller will copy the `my-secret` from the `default` namespace into the `team-a` and `team-b` namespaces.
+- The controller will ensure that the `Secret` in the target namespaces is always in sync with the source `Secret`. If the source `Secret` is updated, the controller will automatically update the target `Secrets` as well.
+- The name of the secret that will be created in the target namespaces will be the same as the source secret, i.e., `my-secret` in this case.
+
+
+## Features
+- One-to-many secret replication: Sync a single secret to multiple namespaces.
+
+- Ownership checks: Ensures existing synced secrets are not overwritten unless they are managed by the same CR resource and controller
+
+- Status reporting: Updates the CR’s .status with success or error messages and the last sync time.
+
+- Finalizer-based cleanup: Automatically deletes target secrets on CR deletion.
+
+- Event-driven updates: Reconciles when source secret is created, deleted or updated.
+
+## Behavior by Scenario
+
+### SecretSync is Created and Source Secret Exists
+- The controller copies the secret from the source namespace to each target namespace.
+- The copied secrets are labeled and annotated for ownership tracking.
+
+### SecretSync is Created but Source Secret Does Not Exist
+- The controller logs an error and updates the `.status` field.
+- Once the source secret is created, the controller automatically retries and syncs it to the targets.
+
+### Source Secret is Updated
+- The controller detects the change and reconciles the SecretSync CR
+- The updated data is copied to all target secrets (if they are managed by this CR).
+
+### SecretSync CR is Deleted
+- A finalizer ensures that all secrets synced by this CR are deleted from the target namespaces.
+- After cleanup, the finalizer is removed, allowing Kubernetes to complete deletion.
+
+### Secret Already Exists in Target Namespace
+If the secret in the target namespace is already present:
+- If managed by this CR (based on annotations), it is updated.
+- If not managed by this CR, it is skipped and a warning is logged into the status field of the CR.
 
 ## Getting Started
 
@@ -110,26 +166,5 @@ the '--force' flag and manually ensure that any custom configuration
 previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
 is manually re-applied afterwards.
 
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+.
 

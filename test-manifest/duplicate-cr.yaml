@@ -1,0 +1,24 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test1
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test2
+---
+# --- 3. Create the SecretSync custom resource ---
+apiVersion: sync.example.com/v1alpha1
+kind: SecretSync
+metadata:
+  name: sync-my-secret-duplicate
+  namespace: default
+spec:
+  sourceName: my-secret
+  sourceNamespace: default
+  targetNamespaces:
+    - test1
+    - test2
+

@@ -20,9 +20,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // SecretSyncSpec defines the desired state of SecretSync.
 type SecretSyncSpec struct {
 	// sourceName is the name of the source Secret to sync.
@@ -45,13 +42,16 @@ type SecretSyncSpec struct {
 type SecretSyncStatus struct {
 	// lastSyncTime is the last time the sync operation was performed.
 	LastSyncTime metav1.Time `json:"lastSyncTime,omitempty"`
-	// message provides additional information about the sync status.
-	Message string `json:"message,omitempty"`
+	// conditions is a list of conditions that describe the current state of the SecretSync CR.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
+// +kubebuilder:printcolumn:name="Synced",type=string,JSONPath=".status.conditions[?(@.type=='Synced')].status"
+// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=".status.conditions[?(@.type=='Synced')].message"
+// +kubebuilder:printcolumn:name="LastTransition",type=string,JSONPath=".status.conditions[?(@.type=='Synced')].lastTransitionTime"
+//
 // SecretSync is the Schema for the secretsyncs API.
 type SecretSync struct {
 	metav1.TypeMeta   `json:",inline"`
