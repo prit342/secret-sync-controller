@@ -75,7 +75,7 @@ If the secret in the target namespace is already present:
 kind create cluster --name secret-sync-cluster
 ```
 
-- Install the controller using the provided `Makefile` commands. You can also run it locally using `make run`. Make sure you run this in a different termina window.
+- Install the controller using the provided `Makefile` commands. You can also run it locally using `make run`. Make sure you run this in a different terminal window.
 - In a different terminal window, apply the sample `SecretSync` CRD provided in the `config/samples/` directory to test the functionality.
 ```bash
 ❯ kubectl apply -f config/crd/bases/sync.example.com_secretsyncs.yaml
