@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	syncv1alpha1 "github.com/prit342/secret-sync-controller/api/v1alpha1"
@@ -75,7 +75,7 @@ const (
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// l := logf.FromContext(ctx)
-	l := logf.Log.WithName("SecretSyncReconciler")
+	l := log.Log.WithName("SecretSyncReconciler")
 
 	l.Info("reconciling for", req.Name, req.NamespacedName)
 	// instance is the CR that called the reconcile function
@@ -101,32 +101,30 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		l.Info("deleting instance and child resources", "name", instance.Name, "namespace", instance.Namespace)
 		if err := r.deleteChildObjects(ctx, instance); err != nil {
 			l.Error(err, "failed to delete child objects")
-			if err := r.updateStatus(ctx, instance, 
-				fmt.Sprintf("failed to delete child objects: %s", err), true); err != nil {
+			msg := fmt.Sprintf("failed to delete child objects: %s", err)
+			if err := r.updateStatus(ctx, instance, msg, true); err != nil {
 				l.Error(err, "failed to update status after error deleting child objects")
-				}
 			}
+
 			// we want to requeue this request to try again later
 			return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later
 		}
 		// remove finzalizer if it exists
 		if err := r.RemoveFinalizer(ctx, instance, secretSyncFinalizer); err != nil {
 			l.Error(err, "failed to delete finalizer")
-			if err := r.updateStatus(ctx, instance, 
+			if err := r.updateStatus(ctx, instance,
 				fmt.Sprintf("%s", err), true); err != nil { // Update status with error
 				l.Error(err, "failed to update status after error removing finalizer")
 				// we want to requeue this request to try again later
-				}
-			return ctrl.Result{RequeueAfter: requeueDelay}, nil      // Try again later
+			}
+			return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later
 		}
-
 		if err := r.Update(ctx, instance); err != nil {
 			l.Error(err, "failed to update instance after removing finalizer")
 			return ctrl.Result{RequeueAfter: requeueDelay}, nil // Try again later
 		}
 		l.Info("finalizer removed and child resources deleted", "name", instance.Name, "namespace", instance.Namespace)
 		return ctrl.Result{}, nil // No need to requeue, cleanup done
-
 	}
 	// Step 3: Add finalizer if not present
 	// on the first reconciliation, we need to add the finalizer
@@ -194,7 +192,6 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	l.Info(successMessage)
-
 	return ctrl.Result{}, nil
 }
 
