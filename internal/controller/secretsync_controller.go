@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,6 +56,7 @@ const (
 	controllerOwnerNamespacekey = "secretsync.example.com/owner-namespace"
 	secretSyncFinalizer         = "secretsync.example.com/finalizer" // finalizer to be added to the SecretSync object
 	requeueDelay                = 7 * time.Minute
+	bySourceSecretIndexKey      = "bySourceSecret" // the key to our local index
 )
 
 // +kubebuilder:rbac:groups=sync.example.com,resources=secretsyncs,verbs=get;list;watch;create;update;patch;delete
@@ -66,7 +68,6 @@ const (
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
 // the SecretSync object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
@@ -142,7 +143,7 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// Return to requeue and ensure consistent state before continuing
 		// we have added the finalizer, so we can requeue
 		l.Info("finalizer added to instance", "name", instance.Name, "namespace", instance.Namespace)
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{}, nil
 	}
 
 	// check if the source namespace is also part of the destination namespace
@@ -160,8 +161,8 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      instance.Spec.SourceName,
 		Namespace: instance.Spec.SourceNamespace,
-	}, srcSecret); err != nil {
-		// if there was an error reading the source secret, we will update the status
+	}, srcSecret); err != nil { // if there was any error reading the source secret
+		// we will update the status of the CR and the update the status with the
 		// with correct message and requeue and retry later
 		msg := fmt.Sprintf("error reading source secret %s in namespace %s: %s",
 			instance.Spec.SourceName, instance.Spec.SourceNamespace, err)
@@ -195,8 +196,60 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, nil
 }
 
+// addFinalizerIfNeeded adds the finalizer to the instance if it is not already present.
+func (r *SecretSyncReconciler) addFinalizerIfNeeded(ctx context.Context, instance *syncv1alpha1.SecretSync, l logr.Logger) (bool, error) {
+	if controllerutil.ContainsFinalizer(instance, secretSyncFinalizer) {
+		return false, nil // Finalizer already present, no need to requeue
+	}
+
+	if ok := controllerutil.AddFinalizer(instance, secretSyncFinalizer); !ok {
+		l.Error(fmt.Errorf("failed to add finalizer %s to instance %s", secretSyncFinalizer, instance.Name),
+			"failed to add finalizer")
+		return false, fmt.Errorf("failed to add finalizer")
+	}
+
+	if err := r.Update(ctx, instance); err != nil {
+		l.Error(err, "failed to update instance after adding finalizer")
+		return false, err
+	}
+
+	l.Info("finalizer added to instance", "name", instance.Name, "namespace", instance.Namespace)
+	return true, nil // Finalizer added, requeue needed
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SecretSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
+
+	// We create a field index for SecretSyncs based on their source secret (namespace/name).
+	// Each index entry maps a Secret's key ("<namespace>/<name>") to the list of SecretSync CRs that reference it.
+	//
+	// we can think of this like a Go map:
+	//
+	//     map[string][]*SecretSync{
+	//         "test-source/example-secret": [ssyncCR1, ssyncCR2],
+	//         "prod/config-secret":         [ssyncCR33],
+	//     }
+	//
+	// This allows for efficient lookup when the source Secret is created or updated.
+	// Instead of scanning all CRs, we can directly retrieve only the relevant SecretSyncs
+	// that reference the changed Secret, and trigger reconciliation for them.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&syncv1alpha1.SecretSync{},
+		bySourceSecretIndexKey, // updated here
+		func(rawObj client.Object) []string {
+			sync := rawObj.(*syncv1alpha1.SecretSync)
+			// sync.Spec.SourceName - source secret name
+			// sync.Spec.SourceNamespace - source secret namespace
+			if sync.Spec.SourceName == "" || sync.Spec.SourceNamespace == "" {
+				return nil
+			}
+			return []string{sync.Spec.SourceName + "/" + sync.Spec.SourceNamespace}
+		},
+	); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		// Primary resource: Reconcile will be triggered when a SecretSync object is created, updated, or deleted.
 		For(&syncv1alpha1.SecretSync{}).
